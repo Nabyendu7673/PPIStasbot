@@ -12,8 +12,10 @@ from scipy.stats import kruskal, f_oneway, ttest_ind, chi2_contingency, pearsonr
 import xgboost as xgb
 import base64 # Import base64 for file downloading
 
-# Removed: import shap # No longer needed
+# Add footer text at the top
+st.markdown('<p>Developed with ❤️ from MEDAI Labs. &copy; 2024. All rights reserved.</p>', unsafe_allow_html=True)
 
+# --- Title ---
 st.title("PPIcheck Statsbot") # Updated the application title
 
 # --- Introduction ---
@@ -1435,7 +1437,7 @@ st.markdown("""
 st.markdown(
     """
     <div class="footer">
-        <p>Developed with ❤️ from MEDAI Lab. &copy; 2024. All rights reserved.</p>
+        <p>&copy; 2023 MedAi Lab. All rights reserved.</p>
     </div>
     """, unsafe_allow_html=True
 )
