@@ -1,24 +1,24 @@
 import streamlit as st
-st.set_page_config(page_title="PPIcheck Statsbot", layout="wide")
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier # Removed RandomForestRegressor as regression is removed
-from sklearn.linear_model import LogisticRegression # Removed LinearRegression as regression is removed
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, f1_score, confusion_matrix, roc_auc_score, roc_curve # Removed regression metrics
-from scipy.stats import kruskal, f_oneway, ttest_ind, chi2_contingency, pearsonr, mannwhitneyu, chi2 # Import chi2 for distribution plot
+from sklearn.metrics import accuracy_score, precision_score, f1_score, confusion_matrix, roc_auc_score, roc_curve
+from scipy.stats import kruskal, f_oneway, ttest_ind, chi2_contingency, pearsonr, mannwhitneyu
 import xgboost as xgb
-import base64 # Import base64 for file downloading
+import base64
 
-# Add footer text at the top
-st.markdown('<p>Developed with ❤️ from MEDAI Labs. &copy; 2024. All rights reserved.</p>', unsafe_allow_html=True)
+# Set Streamlit page configuration
+st.set_page_config(page_title="PPIcheck Statsbot", layout="wide")
 
-# --- Title ---
-st.title("PPIcheck Statsbot") # Updated the application title
+# Set the main title of the application
+st.title("PPIcheck Statsbot")
 
-# --- Introduction ---
+# Footer moved to top and updated
+st.markdown('<p style="text-align: center;">Developed with ❤️ from MEDAI Labs. &copy; 2024. All rights reserved.</p>', unsafe_allow_html=True)
+
+# --- Introduction Section ---
 st.markdown(
     """
     <div style="background-color:#e9ecef; padding: 20px; border-radius: 8px; margin-bottom: 30px; box-shadow: 2px 2px 8px #adb5bd;">
@@ -47,10 +47,10 @@ st.markdown(
 
 
 # --- Synthetic Dataset Generator with Noise ---
-# Use st.cache_data to cache the output of this function
+# Caches the output of this function to improve performance
 @st.cache_data
 def generate_synthetic_data(n=2000, noise_level=0.0):
-    np.random.seed(42)
+    np.random.seed(42) # For reproducibility
     data = pd.DataFrame({
         'age': np.random.randint(18, 90, size=n),
         'bmi': np.round(np.random.normal(24, 5, size=n), 1),
@@ -65,51 +65,48 @@ def generate_synthetic_data(n=2000, noise_level=0.0):
         'ppi_route': np.random.choice(['None', 'Oral', 'IV'], size=n)
     })
 
-    # Add noise to numerical columns
+    # Add noise to numerical columns if noise_level is greater than 0
     if noise_level > 0:
         for col in ['age', 'bmi', 'nsaid_dose_pct', 'antiplatelet_dose', 'anticoagulant_dose', 'indication_score']:
             noise = np.random.normal(0, noise_level * np.std(data[col]), size=n)
-            data[col] = np.clip(data[col] + noise, 0, None)
-            if col != 'bmi':
+            data[col] = np.clip(data[col] + noise, 0, None) # Ensure values are non-negative
+            if col != 'bmi': # Keep BMI as float, convert others to int
                 data[col] = data[col].astype(int)
 
     return data
 
 # --- Scoring Logic ---
-# Use st.cache_data to cache the output of this function
+# Caches the output of this function
 @st.cache_data
 def compute_scores(df):
-    # Check if required columns exist before scoring
+    # Define required columns for scoring
     required_raw_cols = ['nsaid_class', 'nsaid_dose_pct', 'antiplatelet', 'antiplatelet_dose',
                      'anticoagulant', 'anticoagulant_dose', 'indication_score', 'ppi_dose', 'ppi_route']
+    # Check if all required columns exist in the DataFrame
     if not all(col in df.columns for col in required_raw_cols):
         missing = [col for col in required_raw_cols if col not in df.columns]
         st.error(f"Uploaded data must contain the following columns for scoring: {', '.join(missing)}")
         return None # Return None to indicate failure
 
-    # Ensure columns used in scoring are numeric where expected, coerce errors to NaN
     for col in ['nsaid_dose_pct', 'antiplatelet_dose', 'anticoagulant_dose', 'indication_score', 'ppi_dose']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
+    # Function to score NSAID usage
     def score_nsaid(row):
-        # Ensure nsaid_class is a string before using .get()
         nsaid_class = str(row['nsaid_class']) if pd.notna(row['nsaid_class']) else ''
         base = {'Propionic': 3, 'Acetic': 5, 'Oxicam': 4, 'COX-2': 1}.get(nsaid_class, 0)
-        # Use the already coerced numeric column
         nsaid_dose_pct = row['nsaid_dose_pct']
-        if pd.isna(nsaid_dose_pct): return base # Handle non-numeric dose
+        if pd.isna(nsaid_dose_pct): return base
         if nsaid_dose_pct <= 25: return base
         elif nsaid_dose_pct <= 50: return base + 1
         elif nsaid_dose_pct <= 75: return base + 2
         else: return base + 3
 
-
+    # Function to score antiplatelet usage
     def score_antiplatelet(row):
-        # Ensure antiplatelet is a string
         ap = str(row['antiplatelet']) if pd.notna(row['antiplatelet']) else ''
-        # Use the already coerced numeric column
         d = row['antiplatelet_dose']
-        if ap == 'None' or pd.isna(d): return 0 # Handle None or non-numeric dose
+        if ap == 'None' or pd.isna(d): return 0
         if ap == 'Aspirin':
             return 2 if d <= 75 else 3 if d <= 150 else 4
         if ap in ['Clopidogrel', 'Ticagrelor', 'Prasugrel']:
@@ -119,12 +116,11 @@ def compute_scores(df):
         if ap in ['Abciximab', 'Eptifibatide', 'Tirofiban']: return 3
         return 0
 
+    # Function to score anticoagulant usage
     def score_anticoagulant(row):
-        # Ensure anticoagulant is a string
         ac = str(row['anticoagulant']) if pd.notna(row['anticoagulant']) else ''
-        # Use the already coerced numeric column
         d = row['anticoagulant_dose']
-        if ac == 'None' or pd.isna(d): return 0 # Handle None or non-numeric dose
+        if ac == 'None' or pd.isna(d): return 0
         if ac == 'UFH_SC': return 2
         if ac == 'UFH_IV': return 3
         if ac == 'LMWH': return 3 if d >= 1 else 2
@@ -134,42 +130,36 @@ def compute_scores(df):
         if ac == 'Bivalirudin': return 3 if d >= 1.5 else 2
         return 0
 
+    # Function to determine PPI protection score
     def ppi_protection(row):
-        # Ensure ppi_route is a string and ppi_dose is numeric
         ppi_route = str(row['ppi_route']) if pd.notna(row['ppi_route']) else ''
-        # Use the already coerced numeric column
         ppi_dose = row['ppi_dose']
         if ppi_route == 'Oral' and (pd.notna(ppi_dose) and ppi_dose >= 20): return -1
         if ppi_route == 'IV' and (pd.notna(ppi_dose) and ppi_dose >= 40): return -2
         return 0
 
-    # Apply scoring functions, handling potential None returns from apply
+    # Apply scoring functions to create new columns
     df['nsaid_score'] = df.apply(score_nsaid, axis=1)
     df['antiplatelet_score'] = df.apply(score_antiplatelet, axis=1)
     df['anticoagulant_score'] = df.apply(score_anticoagulant, axis=1)
 
-    # Calculate medication_score only if component scores are not None
-    # Ensure component scores are numeric before summing, fillna(0) for safety
+    # Calculate medication_score by summing component scores, filling NaN with 0
     df['medication_score'] = pd.to_numeric(df['nsaid_score'], errors='coerce').fillna(0) + \
                              pd.to_numeric(df['antiplatelet_score'], errors='coerce').fillna(0) + \
                              pd.to_numeric(df['anticoagulant_score'], errors='coerce').fillna(0)
 
-
     df['ppi_score'] = df.apply(ppi_protection, axis=1)
 
-    # Check if required columns exist before calculating flags and total score
+    # Calculate high_risk_flag and triple_flag, then total_score
     if 'medication_score' in df.columns and 'indication_score' in df.columns and 'ppi_score' in df.columns:
-        # Ensure indication_score is numeric for comparison
         indication_score_numeric = pd.to_numeric(df['indication_score'], errors='coerce').fillna(0)
         medication_score_numeric = pd.to_numeric(df['medication_score'], errors='coerce').fillna(0)
         ppi_score_numeric = pd.to_numeric(df['ppi_score'], errors='coerce').fillna(0)
 
         df['high_risk_flag'] = ((medication_score_numeric >= 6) | (indication_score_numeric >= 6)).astype(int)
-        # Ensure nsaid_score, antiplatelet_score, anticoagulant_score are numeric before comparison for triple_flag
         nsaid_score_numeric = pd.to_numeric(df['nsaid_score'], errors='coerce').fillna(0)
         antiplatelet_score_numeric = pd.to_numeric(df['antiplatelet_score'], errors='coerce').fillna(0)
         anticoagulant_score_numeric = pd.to_numeric(df['anticoagulant_score'], errors='coerce').fillna(0)
-
 
         df['triple_flag'] = ((nsaid_score_numeric > 0) & (antiplatelet_score_numeric > 0) & (anticoagulant_score_numeric > 0)).astype(int) * 2
 
@@ -180,18 +170,16 @@ def compute_scores(df):
 
     return df
 
-# Use st.cache_data to cache the output of this function
+# Caches the output of this function
 @st.cache_data
 def assign_labels(df, threshold=8):
-     # Check if 'total_score' exists before assigning labels
     if 'total_score' not in df.columns:
         st.error("Cannot assign labels. 'total_score' column is missing. Please ensure data is scored first.")
         return None
     df['label'] = (df['total_score'] >= threshold).astype(int)
     return df
 
-
-# Function to create a download link for a DataFrame
+# Function to create a download link for a DataFrame as CSV
 def download_dataframe_as_csv(df, filename="download.csv"):
     csv = df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
@@ -214,7 +202,7 @@ df = None # Initialize df outside the if blocks
 if data_source == "Generate Synthetic Data":
     st.sidebar.subheader("Synthetic Data Settings")
     n_samples = st.sidebar.slider("Number of Samples", 100, 5000, 2000, 100)
-    noise_level = st.sidebar.slider("Noise Level (0 = clean)", 0.0, 5.0, 0.1, 0.1) # Changed default noise
+    noise_level = st.sidebar.slider("Noise Level (0 = clean)", 0.0, 5.0, 0.1, 0.1)
 
     if st.sidebar.button("Generate Dataset"):
         df = generate_synthetic_data(n=n_samples, noise_level=noise_level)
@@ -245,9 +233,7 @@ elif data_source == "Upload CSV File":
             # Optionally, compute scores and labels for the uploaded data
             st.sidebar.markdown("---") # Add a separator
             st.sidebar.subheader("Process Uploaded Data")
-            # Use st.cache_data for the processed uploaded data if the original uploaded_file hasn't changed
-            # Note: st.cache_data hashes the function arguments, including the file_uploader object.
-            # If a new file is uploaded, the cache will be re-calculated.
+            # Use st.cache_data for the processed uploaded data if the original uploaded_file hasn-t changed
             @st.cache_data
             def process_uploaded_data(uploaded_df):
                  scored_df = compute_scores(uploaded_df.copy()) # Use a copy of the original upload
@@ -260,7 +246,7 @@ elif data_source == "Upload CSV File":
                  if 'uploaded_df' in st.session_state and st.session_state.uploaded_df is not None:
                      processed_df = process_uploaded_data(st.session_state.uploaded_df) # Call the cached function
                      if processed_df is not None:
-                         st.session_state.df = processed_df # Update session state with scored and labeled data
+                         st.session_state.df = processed_df
                          st.success("Data scored and labeled successfully!")
                          st.dataframe(st.session_state.df.head())
                          st.markdown(download_dataframe_as_csv(st.session_state.df, "scored_uploaded_data.csv"), unsafe_allow_html=True)
@@ -289,14 +275,7 @@ else:
     # Check if 'label' and required feature columns exist for ML
     required_ml_cols = ['age', 'bmi', 'nsaid_score', 'antiplatelet_score', 'anticoagulant_score',
                         'indication_score', 'ppi_score', 'high_risk_flag', 'triple_flag', 'label']
-    # Ensure label column exists and has more than one unique value for classification
     ml_ready_classification = all(col in df.columns for col in required_ml_cols) and df['label'].nunique() > 1
-
-    # Check if required columns exist for regression (using total_score as an example target)
-    # Removed ml_ready_regression as regression section is removed
-    # required_regression_cols = ['age', 'bmi', 'total_score'] # Example columns for regression
-    # ml_ready_regression = all(col in df.columns for col in required_regression_cols) and df['total_score'].nunique() > 1 # Ensure target has variability
-
 
     # Check if required columns exist for statistical tests
     required_stat_cols = ['indication_score', 'ppi_route', 'nsaid_score', 'ppi_dose', 'bmi', 'label',
@@ -534,24 +513,6 @@ if st.sidebar.button("Run All Predefined Statistical Tests", disabled=not (data_
                             "Conclusion": get_conclusion(p_value_to_report)
                         })
 
-                        # Chi-Square Distribution Plot
-                        if dof_chi2_hr_label > 0:
-                            st.markdown("**Chi-Square Distribution:**")
-                            fig, ax = plt.subplots()
-                            x = np.linspace(0, chi2.ppf(0.99, dof_chi2_hr_label) + 5, 100)
-                            ax.plot(x, chi2.pdf(x, dof_chi2_hr_label), 'r-', lw=2, label=f'DOF = {dof_chi2_hr_label}')
-                            # Shade the critical region (alpha=0.05)
-                            x_crit = np.linspace(chi2.ppf(0.95, dof_chi2_hr_label), chi2.ppf(0.99, dof_chi2_hr_label) + 5, 100)
-                            ax.fill_between(x_crit, chi2.pdf(x_crit, dof_chi2_hr_label), color='red', alpha=0.2, label='Critical Region (α=0.05)')
-                            # Mark the calculated Chi-Square statistic
-                            ax.axvline(stat_to_report, color='blue', linestyle='dashed', linewidth=2, label=f'Calculated $\chi^2$ = {stat_to_report}')
-                            ax.set_xlabel('Chi-Square Statistic')
-                            ax.set_ylabel('Probability Density Function')
-                            ax.set_title('Chi-Square Distribution')
-                            ax.legend()
-                            st.pyplot(fig)
-                            plt.close(fig)
-
                     except ValueError:
                          test_results.append({
                             "Test": "Chi-Square Test",
@@ -730,25 +691,6 @@ if st.sidebar.button("Run All Predefined Statistical Tests", disabled=not (data_
                             "Conclusion": get_conclusion(p_value_to_report)
                         })
 
-                        # Chi-Square Distribution Plot
-                        if dof_chi2_ap_ac > 0:
-                            st.markdown("**Chi-Square Distribution:**")
-                            fig, ax = plt.subplots()
-                            x = np.linspace(0, chi2.ppf(0.99, dof_chi2_ap_ac) + 5, 100)
-                            ax.plot(x, chi2.pdf(x, dof_chi2_ap_ac), 'r-', lw=2, label=f'DOF = {dof_chi2_ap_ac}')
-                            # Shade the critical region (alpha=0.05)
-                            x_crit = np.linspace(chi2.ppf(0.95, dof_chi2_ap_ac), chi2.ppf(0.99, dof_chi2_ap_ac) + 5, 100)
-                            ax.fill_between(x_crit, chi2.pdf(x_crit, dof_chi2_ap_ac), color='red', alpha=0.2, label='Critical Region (α=0.05)')
-                            # Mark the calculated Chi-Square statistic
-                            ax.axvline(stat_to_report, color='blue', linestyle='dashed', linewidth=2, label=f'Calculated $\chi^2$ = {stat_to_report}')
-                            ax.set_xlabel('Chi-Square Statistic')
-                            ax.set_ylabel('Probability Density Function')
-                            ax.set_title('Chi-Square Distribution')
-                            ax.legend()
-                            st.pyplot(fig)
-                            plt.close(fig)
-
-
                     except ValueError:
                          test_results.append({
                             "Test": "Chi-Square Test",
@@ -788,27 +730,62 @@ if st.sidebar.button("Run All Predefined Statistical Tests", disabled=not (data_
 
         # --- Added Statistical Tests ---
 
-        # 8. Correlation Matrix for Numerical Variables
+        # 8. Correlation Matrix for Numerical Variables (Textual Summary)
         st.markdown("### Correlation Matrix (Numerical Variables)")
         numerical_cols = df.select_dtypes(include=np.number).columns.tolist()
         if len(numerical_cols) > 1:
             try:
-                # Drop rows with any NaN in numerical columns for correlation matrix
                 df_corr_matrix = df[numerical_cols].dropna()
                 if len(df_corr_matrix) > 1:
                     corr_matrix = df_corr_matrix.corr()
-                    fig_corr, ax_corr = plt.subplots(figsize=(10, 8))
-                    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f", ax=ax_corr)
-                    ax_corr.set_title("Correlation Matrix of Numerical Variables")
-                    st.pyplot(fig_corr)
-                    plt.close(fig_corr)
+                    st.write("Pairwise Pearson Correlation Coefficients:")
+                    st.dataframe(corr_matrix) # Display as a DataFrame
+
+                    # Generate summary for correlation matrix
+                    correlation_summary_points = []
+                    
+                    # Store correlations to sort by absolute value later
+                    correlations_to_summarize = []
+
+                    for i in range(len(corr_matrix.columns)):
+                        for j in range(i + 1, len(corr_matrix.columns)):
+                            col1 = corr_matrix.columns[i]
+                            col2 = corr_matrix.columns[j]
+                            corr_val = corr_matrix.iloc[i, j]
+
+                            # Only highlight correlations between 0.7 and 0.9 (exclusive of 0.9)
+                            if 0.7 <= abs(corr_val) < 0.9:
+                                correlations_to_summarize.append((abs(corr_val), col1, col2, corr_val))
+
+                    # Sort by absolute correlation value in descending order
+                    correlations_to_summarize.sort(key=lambda x: x[0], reverse=True)
+
+                    for abs_corr, col1, col2, corr_val in correlations_to_summarize:
+                        relationship_type = "positive" if corr_val > 0 else "negative"
+                        correlation_summary_points.append(f"A notable {relationship_type} linear relationship ({corr_val:.3f}) exists between **{col1}** and **{col2}**.")
+                        # Limit to 3 points
+                        if len(correlation_summary_points) >= 3:
+                            break # Exit loop once 3 points are collected
+
+                    correlation_summary = ""
+                    if correlation_summary_points:
+                        correlation_summary += "Key correlations (between 0.7 and 0.9, exclusive of 0.9) observed:\n\n"
+                        for point in correlation_summary_points:
+                            correlation_summary += f"- {point}\n"
+                        if len(correlations_to_summarize) > len(correlation_summary_points):
+                            correlation_summary += f"- ... and {len(correlations_to_summarize) - len(correlation_summary_points)} more such correlations.\n"
+                    else:
+                        correlation_summary += "No correlations were found in the range of 0.7 to 0.9 (exclusive of 0.9) between the numerical variables."
+
+                    st.markdown(correlation_summary) # Display summary directly below the table
+
                     test_results.append({
                         "Test": "Correlation Matrix",
                         "Variables": ", ".join(numerical_cols),
                         "Statistic Type": "Correlation Coefficients",
-                        "Statistic": "See heatmap",
+                        "Statistic": "See table",
                         "P-value": np.nan, # P-values for individual correlations could be added if needed, using np.nan
-                        "Conclusion": "Displays the pairwise linear correlation between numerical variables (excluding rows with missing values)."
+                        "Conclusion": correlation_summary # This will be added to the overall interpretation
                     })
                 else:
                     st.info("Not enough data points with non-null numerical values to generate a correlation matrix.")
@@ -842,92 +819,6 @@ if st.sidebar.button("Run All Predefined Statistical Tests", disabled=not (data_
             })
 
 
-        # Removed the Simple Linear Regression section as requested by the user.
-        # # 9. Simple Linear Regression: Predict Total Score from Age and BMI
-        # st.markdown("### Simple Linear Regression (Predicting Total Score)")
-        # regression_cols = ['age', 'bmi', 'total_score']
-        # if all(col in df.columns for col in regression_cols):
-        #     df_reg = df[regression_cols].dropna()
-        #     if len(df_reg) > 1:
-        #         X_reg = df_reg[['age', 'bmi']]
-        #         y_reg = df_reg['total_score']
-
-        #         # Split data for regression evaluation
-        #         if len(df_reg) > 2: # Need at least 2 samples for split
-        #             X_train_reg, X_test_reg, y_train_reg, y_test_reg = train_test_split(X_reg, y_reg, test_size=0.2, random_state=42)
-
-        #             regression_models = {
-        #                 "Linear Regression": LinearRegression(),
-        #                 # Removed Regression ML models
-        #             }
-
-        #             ml_results_text_reg = "Machine Learning Model Performance Metrics (Regression):\n\n"
-
-        #             for name, model_reg in regression_models.items():
-        #                 st.markdown(f"### {name}")
-        #                 model_reg.fit(X_train_reg, y_train_reg)
-        #                 y_pred_reg = model_reg.predict(X_test_reg)
-
-        #                 mse = mean_squared_error(y_test_reg, y_pred_reg)
-        #                 r2 = r2_score(y_test_reg, y_pred_reg)
-
-        #                 # Define regression_target and regression_features based on context
-        #                 regression_target = 'total_score'
-        #                 regression_features = ['age', 'bmi']
-
-        #                 st.write(f"**Model:** Predicting '{regression_target}' using {', '.join(regression_features)}")
-        #                 st.write(f"**Mean Squared Error (MSE):** {mse:.3f}")
-        #                 st.write(f"**R-squared (R2):** {r2:.3f}")
-
-        #                 # Plot predicted vs actual
-        #                 fig, ax = plt.subplots()
-        #                 ax.scatter(y_test_reg, y_pred_reg, alpha=0.5)
-        #                 ax.plot([y_test_reg.min(), y_test_reg.max()], [y_test_reg.min(), y_test_reg.max()], 'k--', lw=2)
-        #                 ax.set_xlabel("Actual")
-        #                 ax.set_ylabel("Predicted")
-        #                 ax.set_title("Actual vs Predicted Values")
-        #                 st.pyplot(fig)
-        #                 plt.close(fig) # Close figure
-
-        #                 # Feature Importance (for tree-based models)
-        #                 if name in ["Random Forest Regressor", "Gradient Boosting Regressor", "XGBoost Regressor"]:
-        #                      st.subheader("Feature Importance")
-        #                      if hasattr(model_reg, 'feature_importances_'):
-        #                          importance_reg = model_reg.feature_importances_
-        #                          feature_names_reg = X_train_reg.columns
-        #                          feature_importance_df_reg = pd.DataFrame({'feature': feature_names_reg, 'importance': importance_reg}).sort_values('importance', ascending=False)
-
-        #                          fig, ax = plt.subplots()
-        #                          sns.barplot(x='importance', y='feature', data=feature_importance_df_reg, ax=ax)
-        #                          ax.set_title('Feature Importance')
-        #                          st.pyplot(fig)
-        #                          plt.close(fig) # Close figure
-        #                      else:
-        #                          st.info("Feature importance not available for this model.")
-
-        #                 ml_results_text_reg += f"{name}:\n"
-        #                 ml_results_text_reg += f"  Mean Squared Error: {mse:.3f}\n"
-        #                 ml_results_text_reg += f"  R-squared: {r2:.3f}\n\n"
-
-        #             # Download button for ML Regression Results
-        #             st.markdown(download_text_file(ml_results_text_reg, "ml_performance_metrics_regression.txt"), unsafe_allow_html=True)
-
-        #         else:
-        #             st.warning("Not enough data points with non-null values for regression analysis after dropping NaNs.")
-        #     else:
-        #         st.warning("Insufficient data points with non-null values for regression analysis after dropping NaNs.")
-        # else:
-        #     st.warning("Missing 'age', 'bmi', or 'total_score' columns for linear regression analysis.")
-        #     test_results.append({
-        #         "Test": "Linear Regression",
-        #         "Variables": "Predicting Total Score from Age and BMI",
-        #         "Statistic Type": "MSE, R2",
-        #         "Statistic": np.nan,
-        #         "P-value": np.nan,
-        #         "Conclusion": "Missing required columns ('age', 'bmi', or 'total_score')."
-        #     })
-
-
         # Display results in a table
         st.markdown("### Summary of Statistical Test Results")
         results_df = pd.DataFrame(test_results)
@@ -956,9 +847,9 @@ if st.sidebar.button("Run All Predefined Statistical Tests", disabled=not (data_
         for index, row in results_df.iterrows():
             test_name = row['Test']
             variables = row['Variables']
-            p_value = row['P-value'] # Use the numeric p_value from the DataFrame
+            # Corrected: Changed 'P_value' to 'P-value' to match the DataFrame column name
+            p_value = row['P-value'] 
             conclusion_text = row['Conclusion']
-            statistic_type = row['Statistic Type']
             statistic_value = row['Statistic']
 
             interpretation_html += f"""<li><p style="color: #495057;"><b>{test_name} ({variables}):</b> """
@@ -967,9 +858,6 @@ if st.sidebar.button("Run All Predefined Statistical Tests", disabled=not (data_
                 interpretation_html += f"""<span style="color: #6c757d;">{conclusion_text}.</span> <i>This test could not be performed due to data limitations.</i></p></li>"""
             elif test_name == "Correlation Matrix":
                  interpretation_html += f"""<span style="color: #495057;">{conclusion_text}</span></p></li>"""
-            # Removed the Linear Regression interpretation case
-            # elif test_name == "Linear Regression":
-            #      interpretation_html += f"""<span style="color: #495057;">{conclusion_text}</span></p></li>"""
             elif p_value is not None and not pd.isna(p_value): # Check if p_value is valid for inferential tests
                 if p_value < 0.05:
                     interpretation_html += f"""
@@ -1174,26 +1062,6 @@ if data_available:
                                 st.write(f"Chi-squared statistic ({'with Yates' if yates_applied_manual else 'without Yates'}): {chi2_stat_manual:.3f}")
                                 st.write(f"P-value: {p_value_manual:.3f}")
 
-                                # Manual Chi-Square Distribution Plot
-                                if dof_manual > 0:
-                                    st.markdown("**Chi-Square Distribution:**")
-                                    fig, ax = plt.subplots()
-                                    # Adjust the upper limit of the x-axis for better visualization if the calculated statistic is large
-                                    x_limit = max(chi2.ppf(0.99, dof_manual), chi2_stat_manual) + 5
-                                    x = np.linspace(0, x_limit, 100)
-                                    ax.plot(x, chi2.pdf(x, dof_manual), 'r-', lw=2, label=f'DOF = {dof_manual}')
-                                    # Shade the critical region (alpha=0.05)
-                                    x_crit = np.linspace(chi2.ppf(0.95, dof_manual), x_limit, 100)
-                                    ax.fill_between(x_crit, chi2.pdf(x_crit, dof_manual), color='red', alpha=0.2, label='Critical Region (α=0.05)')
-                                    # Mark the calculated Chi-Square statistic
-                                    ax.axvline(chi2_stat_manual, color='blue', linestyle='dashed', linewidth=2, label=f'Calculated $\chi^2$ = {chi2_stat_manual:.3f}')
-                                    ax.set_xlabel('Chi-Square Statistic')
-                                    ax.set_ylabel('Probability Density Function')
-                                    ax.set_title('Chi-Square Distribution')
-                                    ax.legend()
-                                    st.pyplot(fig)
-                                    plt.close(fig)
-
                             else:
                                 st.warning("Insufficient data or variability in selected columns (need >1 row/col and sum >= 5 after dropping NaNs) for Chi-squared test.")
                         else:
@@ -1250,7 +1118,6 @@ if st.sidebar.button("Run ML Assessment", disabled=not (data_available and ml_re
                 <h2 style="color: #007bff; text-align: center; margin-top: 30px; margin-bottom: 20px;">Machine Learning Model Performance (Classification)</h2>
                 """, unsafe_allow_html=True
             )
-            # Corrected typo here: 'antiplateplatelet_score' to 'antiplatelet_score'
             required_ml_clf_features = ['age', 'bmi', 'nsaid_score', 'antiplatelet_score', 'anticoagulant_score',
                                          'indication_score', 'ppi_score', 'high_risk_flag', 'triple_flag']
 
@@ -1266,7 +1133,7 @@ if st.sidebar.button("Run ML Assessment", disabled=not (data_available and ml_re
                 models = {
                     'Logistic Regression': LogisticRegression(max_iter=1000),
                     'Random Forest': RandomForestClassifier(),
-                    'XGBoost': xgb.XGBClassifier(eval_metric='logloss', use_label_encoder=False), # Added eval_metric and use_label_encoder
+                    'XGBoost': xgb.XGBClassifier(eval_metric='logloss', use_label_encoder=False),
                     'Gradient Boosting': GradientBoostingClassifier()
                 }
 
@@ -1280,33 +1147,11 @@ if st.sidebar.button("Run ML Assessment", disabled=not (data_available and ml_re
 
                     st.markdown(f"### {name}")
 
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        fig_cm, ax_cm = plt.subplots()
-                        sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', cmap='Blues', ax=ax_cm)
-                        ax_cm.set_title("Confusion Matrix")
-                        ax_cm.set_xlabel("Predicted")
-                        ax_cm.set_ylabel("Actual")
-                        st.pyplot(fig_cm)
-                        plt.close(fig_cm) # Close figure
-
-                    with col2:
-                        fpr, tpr, _ = roc_curve(y_test, y_prob)
-                        auc = roc_auc_score(y_test, y_prob)
-                        fig_roc, ax_roc = plt.subplots()
-                        ax_roc.plot(fpr, tpr, label=f"AUC = {auc:.2f}")
-                        ax_roc.plot([0, 1], [0, 1], linestyle='--', color='gray')
-                        ax_roc.set_title("ROC Curve")
-                        ax_roc.set_xlabel("False Positive Rate")
-                        ax_roc.set_ylabel("True Positive Rate")
-                        ax_roc.legend()
-                        st.pyplot(fig_roc)
-                        plt.close(fig_roc) # Close figure
-
                     # Box for Model Performance Metrics and Interpretation
                     accuracy = accuracy_score(y_test, y_pred)
                     precision = precision_score(y_test, y_pred)
                     f1 = f1_score(y_test, y_pred)
+                    auc = roc_auc_score(y_test, y_prob)
 
                     ml_metrics_html = f"""
                         <div style="background-color:#e9ecef; padding: 15px; border-left: 5px solid #007bff; border-radius: 5px; margin-top: 10px; margin-bottom: 20px;">
@@ -1319,6 +1164,24 @@ if st.sidebar.button("Run ML Assessment", disabled=not (data_available and ml_re
                             <p style="color: #495057;">
                             These metrics show how well the model performs on the test data. High scores (closer to 1.0 for Accuracy, Precision, F1, and AUC) indicate better performance. The AUC represents the model's ability to distinguish between the positive and negative classes.
                             </p>
+                            <h4 style="color: #343a40; margin-top: 15px;'>Confusion Matrix:</h4>
+                    """
+                    # Display confusion matrix as a DataFrame with explicit labels
+                    cm = confusion_matrix(y_test, y_pred)
+                    cm_df = pd.DataFrame(cm, 
+                                         index=['Actual Negative (Label 0)', 'Actual Positive (Label 1)'],
+                                         columns=['Predicted Negative (Label 0)', 'Predicted Positive (Label 1)'])
+                    
+                    # Add True Positive, True Negative, False Positive, False Negative labels
+                    cm_labeled_df = pd.DataFrame({
+                        'Metric': ['True Negative (TN)', 'False Positive (FP)', 'False Negative (FN)', 'True Positive (TP)'],
+                        'Count': [cm[0,0], cm[0,1], cm[1,0], cm[1,1]]
+                    })
+
+                    ml_metrics_html += cm_df.to_html(classes='table table-striped') + "<br>" # Convert original CM to HTML table
+                    ml_metrics_html += "<p style='color: #495057;'><b>Detailed Confusion Matrix Breakdown:</b></p>"
+                    ml_metrics_html += cm_labeled_df.to_html(classes='table table-striped') # Convert labeled CM to HTML table
+                    ml_metrics_html += """
                         </div>
                     """
                     st.markdown(ml_metrics_html, unsafe_allow_html=True)
@@ -1328,14 +1191,16 @@ if st.sidebar.button("Run ML Assessment", disabled=not (data_available and ml_re
                     ml_results_text += f"  Accuracy: {accuracy:.2f}\n"
                     ml_results_text += f"  Precision: {precision:.2f}\n"
                     ml_results_text += f"  F1 Score: {f1:.2f}\n"
-                    ml_results_text += f"  AUC: {auc:.2f}\n\n"
+                    ml_results_text += f"  AUC: {auc:.2f}\n"
+                    ml_results_text += f"  Confusion Matrix:\n"
+                    ml_results_text += f"    True Negative (TN): {cm[0,0]}\n"
+                    ml_results_text += f"    False Positive (FP): {cm[0,1]}\n"
+                    ml_results_text += f"    False Negative (FN): {cm[1,0]}\n"
+                    ml_results_text += f"    True Positive (TP): {cm[1,1]}\n\n"
 
 
                 # Download button for ML Results
                 st.markdown(download_text_file(ml_results_text, "ml_performance_metrics_classification.txt"), unsafe_allow_html=True)
-
-        # Removed Regression ML section
-
 
         if not ml_ready_classification: # Check only classification readiness now
              st.info("Data not ready for ML assessment. Check warnings above.")
@@ -1416,28 +1281,17 @@ st.markdown("""
         }
     }
 
-    /* Footer styling */
-    .footer {
-        position: fixed;
-        left: 0;
-        bottom: 0;
+    /* Header Footer styling (for the moved footer) */
+    .header-footer {
         width: 100%;
         background-color: #f8f9fa;
         color: #6c757d;
-        text_align: center;
+        text-align: center;
         padding: 10px 0;
-        font_size: 0.9rem;
-        border_top: 1px solid #ced4da; /* Added a subtle border top */
+        font-size: 0.9rem;
+        border-bottom: 1px solid #ced4da; /* Added a subtle border bottom */
+        margin-bottom: 20px; /* Space between header-footer and next section */
     }
 </style>
 """, unsafe_allow_html=True
-)
-
-# --- Footer ---
-st.markdown(
-    """
-    <div class="footer">
-        <p>&copy; 2023 MedAi Lab. All rights reserved.</p>
-    </div>
-    """, unsafe_allow_html=True
 )
