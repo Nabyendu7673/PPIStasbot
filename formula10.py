@@ -1435,7 +1435,7 @@ st.markdown("""
 st.markdown(
     """
     <div class="footer">
-        <p>&copy; 2023 MedAi Lab. All rights reserved.</p>
+        <p>Developed with ❤️ from MEDAI Lab. &copy; 2024. All rights reserved.</p>
     </div>
     """, unsafe_allow_html=True
 )
